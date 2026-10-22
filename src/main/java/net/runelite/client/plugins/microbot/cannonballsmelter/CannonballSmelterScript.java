@@ -14,11 +14,9 @@ import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.camera.Rs2Camera;
 import net.runelite.client.plugins.microbot.api.tileobject.models.Rs2TileObjectModel;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
-import net.runelite.client.plugins.microbot.util.keyboard.Rs2Keyboard;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
 
 import javax.inject.Inject;
-import java.awt.event.KeyEvent;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 
@@ -94,7 +92,7 @@ public class CannonballSmelterScript extends Script {
         else if(hasBars()) {
             state = CannonballSmelterStates.SMELTING;
         }
-        else if (!hasBars() || hasBalls()){
+        else {
             state = CannonballSmelterStates.BANKING;
         }
     }
@@ -126,13 +124,17 @@ public class CannonballSmelterScript extends Script {
     }
 
     public void bank() {
-        if (!hasBalls() || hasBars()) return;
-    
+        // Only a stocked player (bars already in hand) has nothing to do here. The old
+        // `!hasBalls() || hasBars()` guard returned silently for "no balls and no bars",
+        // so a fresh start sat in BANKING forever: the tick loop kept running and no bar
+        // was ever withdrawn (F1).
+        if (hasBars()) return;
+
         Microbot.status = "Banking...";
         int attempts = 0;
-    
+
         while (!Rs2Bank.isOpen() && attempts++ < 10) {
-            if (!isRunning()) break;
+            if (!isRunning()) return;
 
             if(config.getFurnace() == Furnace.SHILO_VILLAGE) {
                 var banker = Microbot.getRs2NpcCache().query().withName("Banker").nearestOnClientThread();
@@ -143,22 +145,41 @@ public class CannonballSmelterScript extends Script {
 
             sleep(300, 600);
         }
-    
-        if (Rs2Bank.isOpen() && !Rs2Bank.hasItem(ItemID.STEEL_BAR)) {
+
+        if (!Rs2Bank.isOpen()) {
+            Microbot.showMessage("Bank did not open. Halting.");
+            shutdown();
+            return;
+        }
+
+        // Deposit the produced cannonballs BEFORE withdrawing bars (F2): the batch leaves
+        // them in the inventory and nothing ever deposited them, so the stack filled every
+        // slot and the bar withdraw had nowhere to land.
+        if (hasBalls() && !Rs2Bank.depositAll(ItemID.MCANNONBALL)) {
+            Microbot.log("Could not deposit cannonballs; retrying next cycle.");
+            return;
+        }
+
+        if (!Rs2Bank.hasItem(ItemID.STEEL_BAR)) {
             Microbot.showMessage("No steel bars in bank. Halting.");
             sleep(3000, 5000);
             shutdown();
             return;
         }
-    
+
         Rs2Bank.withdrawAll(ItemID.STEEL_BAR);
         sleepUntil(this::hasBars);
-    
-        if (hasBars()) {
-            Rs2Keyboard.keyPress(KeyEvent.VK_ESCAPE);
-        } else {
+
+        if (!hasBars()) {
             Microbot.showMessage("Failed to withdraw steel bars.");
             shutdown();
+            return;
+        }
+
+        // Verified close: the ESC dispatch is dropped while a human owns the input, so the
+        // old keyPress could leave the bank open with the bars in the inventory.
+        if (!Rs2Bank.closeBank()) {
+            Microbot.log("Bank did not close after the withdraw; retrying next cycle.");
         }
     }
     
@@ -199,7 +220,7 @@ public class CannonballSmelterScript extends Script {
         Rs2Bank.withdrawAll(ItemID.STEEL_BAR);
         sleepUntil(() -> Rs2Inventory.hasItem(ItemID.STEEL_BAR));
         if(Rs2Inventory.hasItem(ItemID.STEEL_BAR)) {
-            Rs2Keyboard.keyPress(KeyEvent.VK_ESCAPE);
+            Rs2Bank.closeBank(); // verified close, same as bank()
         }
         if (!Rs2Inventory.hasItem(ItemID.STEEL_BAR)) {
             Microbot.showMessage("Could not find item in bank.");
